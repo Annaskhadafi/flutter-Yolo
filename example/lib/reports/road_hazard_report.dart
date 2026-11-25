@@ -9,6 +9,7 @@ class RoadHazardReportEvent {
   final String label;
   final double confidence;
   final DateTime timestamp;
+  final Duration? videoOffset;
   final double? latitude;
   final double? longitude;
   final double? speedKmh;
@@ -20,6 +21,7 @@ class RoadHazardReportEvent {
     required this.label,
     required this.confidence,
     required this.timestamp,
+    this.videoOffset,
     this.latitude,
     this.longitude,
     this.speedKmh,
@@ -73,6 +75,22 @@ class RoadHazardReportExporter {
     return h > 0 ? '${h}h ${m}m ${s}s' : '${m}m ${s}s';
   }
 
+  String _two(int value) => value.toString().padLeft(2, '0');
+
+  String _formatTimestamp(DateTime dt) {
+    final local = dt.toLocal();
+    return '${local.year}-${_two(local.month)}-${_two(local.day)} '
+        '${_two(local.hour)}:${_two(local.minute)}:${_two(local.second)}';
+  }
+
+  String _formatOffset(Duration offset) {
+    final safe = offset.isNegative ? Duration.zero : offset;
+    final h = safe.inHours;
+    final m = safe.inMinutes.remainder(60);
+    final s = safe.inSeconds.remainder(60);
+    return '${_two(h)}:${_two(m)}:${_two(s)}';
+  }
+
   Uint8List toXlsx(RoadHazardReport report) {
     final book = Excel.createExcel();
     final sheet = book['Road Hazard'];
@@ -84,9 +102,9 @@ class RoadHazardReportExporter {
       [TextCellValue('Road section'), TextCellValue(report.roadSection)],
       [
         TextCellValue('Start'),
-        TextCellValue(report.startTime.toIso8601String()),
+        TextCellValue(_formatTimestamp(report.startTime)),
       ],
-      [TextCellValue('End'), TextCellValue(report.endTime.toIso8601String())],
+      [TextCellValue('End'), TextCellValue(_formatTimestamp(report.endTime))],
       [
         TextCellValue('Duration'),
         TextCellValue(_duration(report.durationSeconds)),
@@ -104,6 +122,7 @@ class RoadHazardReportExporter {
         TextCellValue('Hazard'),
         TextCellValue('Confidence'),
         TextCellValue('Timestamp'),
+        TextCellValue('Video Offset'),
         TextCellValue('Latitude'),
         TextCellValue('Longitude'),
         TextCellValue('Speed km/h'),
@@ -116,7 +135,10 @@ class RoadHazardReportExporter {
         TextCellValue(event.id),
         TextCellValue(event.label),
         DoubleCellValue(event.confidence.clamp(0, 1).toDouble()),
-        TextCellValue(event.timestamp.toIso8601String()),
+        TextCellValue(_formatTimestamp(event.timestamp)),
+        TextCellValue(
+          event.videoOffset == null ? '' : _formatOffset(event.videoOffset!),
+        ),
         event.latitude == null ? null : DoubleCellValue(event.latitude!),
         event.longitude == null ? null : DoubleCellValue(event.longitude!),
         event.speedKmh == null ? null : DoubleCellValue(event.speedKmh!),
@@ -200,7 +222,7 @@ class RoadHazardReportExporter {
               _badge('INSPECTOR', report.inspectorName),
               _badge('ROAD SECTION', report.roadSection),
               _badge('SEVERITY', report.severity, color: severityColor),
-              _badge('START', report.startTime.toLocal().toString()),
+              _badge('START', _formatTimestamp(report.startTime)),
               _badge('DURATION', _duration(report.durationSeconds)),
               _badge(
                 'DISTANCE',
@@ -344,7 +366,9 @@ class RoadHazardReportExporter {
                 ),
                 pw.SizedBox(height: 3),
                 pw.Text(
-                  event.timestamp.toLocal().toString(),
+                  event.videoOffset == null
+                      ? _formatTimestamp(event.timestamp)
+                      : '${_formatTimestamp(event.timestamp)} · Offset ${_formatOffset(event.videoOffset!)}',
                   style: const pw.TextStyle(
                     fontSize: 8,
                     color: PdfColors.grey700,

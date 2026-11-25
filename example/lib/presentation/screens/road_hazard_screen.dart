@@ -97,16 +97,21 @@ class _RoadHazardScreenState extends State<RoadHazardScreen> {
           )
           .toList(growable: false),
     );
-    final activeTrackIds = _detectionTracker.activeIds;
-    _eventIdByTrackId.removeWhere((id, _) => !activeTrackIds.contains(id));
+    final uncaptured = _detectionTracker.uncaptured(tracked);
     setState(() {
-      _latestHazard = hazards.isEmpty ? null : hazards.first;
-      _latestHazardId = tracked.isEmpty ? null : tracked.first.id;
+      _latestHazard = uncaptured.isEmpty
+          ? null
+          : hazards[tracked.indexOf(uncaptured.first)];
+      _latestHazardId = uncaptured.isEmpty ? null : uncaptured.first.id;
     });
     if (!_recording || hazards.isEmpty) return;
     for (var index = 0; index < tracked.length; index++) {
       final detection = tracked[index];
-      if (_eventIdByTrackId.containsKey(detection.id)) continue;
+      if (_detectionTracker.isCaptured(detection.id) ||
+          _eventIdByTrackId.containsKey(detection.id)) {
+        continue;
+      }
+      _detectionTracker.markCaptured(detection.id);
       _eventIdByTrackId[detection.id] = detection.id;
       _pendingCaptures.add((result: hazards[index], trackId: detection.id));
       unawaited(_processPendingCaptures());
@@ -284,12 +289,14 @@ class _RoadHazardScreenState extends State<RoadHazardScreen> {
         final photoFile = File(photoPath);
         if (photoFile.existsSync()) photoBytes = photoFile.readAsBytesSync();
       }
+      final offsetMs = event['videoOffsetMs'];
       return RoadHazardReportEvent(
         id: event['id'] as String? ?? '',
         label: event['label'] as String? ?? 'Other',
         confidence: (event['confidence'] as num?)?.toDouble() ?? 0,
         timestamp:
             DateTime.tryParse(event['time'] as String? ?? '') ?? DateTime.now(),
+        videoOffset: offsetMs is int ? Duration(milliseconds: offsetMs) : null,
         latitude: (event['latitude'] as num?)?.toDouble(),
         longitude: (event['longitude'] as num?)?.toDouble(),
         speedKmh: (event['speedKmh'] as num?)?.toDouble(),
@@ -955,6 +962,17 @@ class _RoadHazardScreenState extends State<RoadHazardScreen> {
           : AppBar(
               title: const Text('Road Hazard AI'),
               actions: [
+                IconButton(
+                  tooltip: 'Upload & Analisis Video',
+                  icon: const Icon(Icons.video_file_outlined),
+                  onPressed: () async {
+                    await Navigator.pushNamed(context, '/video');
+                    if (mounted) {
+                      _sessions.clear();
+                      await _loadSessions();
+                    }
+                  },
+                ),
                 IconButton(
                   tooltip: 'Riwayat inspeksi',
                   icon: const Icon(Icons.history),
