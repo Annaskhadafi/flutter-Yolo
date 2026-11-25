@@ -40,6 +40,7 @@ build/
 
 # Model files — NEVER commit model weights (they bloat git history and break pub publish validation).
 **/*.tflite
+!example/assets/models/roadchitra.tflite
 **/*.mlmodel
 **/*.mlmodelc
 **/*.mlpackage

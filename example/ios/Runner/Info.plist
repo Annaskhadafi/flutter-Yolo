@@ -30,6 +30,8 @@
 		<true/>
 		<key>NSCameraUsageDescription</key>
 		<string>Ultralytics YOLO uses your camera to detect objects, segment images, and run inference in real time.</string>
+		<key>NSLocationWhenInUseUsageDescription</key>
+		<string>RoadChitra records the inspection location and estimated route distance when you enable location.</string>
 		<key>NSPhotoLibraryUsageDescription</key>
 		<string>Allows you to pick photos for YOLO inference.</string>
 		<key>NSPhotoLibraryAddUsageDescription</key>

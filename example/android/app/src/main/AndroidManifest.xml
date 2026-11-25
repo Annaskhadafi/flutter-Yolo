@@ -3,19 +3,22 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <!-- Internet permission for downloading models -->
     <uses-permission android:name="android.permission.INTERNET" />
-    <!-- Camera permissions -->
+    <!-- Camera and foreground GPS permissions for field inspections -->
     <uses-permission android:name="android.permission.CAMERA" />
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
     <uses-feature android:name="android.hardware.camera" />
     <uses-feature android:name="android.hardware.camera.autofocus" />
 
     <application
-        android:label="Ultralytics YOLO"
+        android:label="RoadChitra Road Hazard"
         android:name="${applicationName}"
         android:icon="@mipmap/ic_launcher">
         <activity
             android:name="com.ultralytics.yolo.MainActivity"
             android:exported="true"
             android:launchMode="singleTop"
+            android:screenOrientation="sensor"
             android:taskAffinity=""
             android:theme="@style/LaunchTheme"
             android:configChanges="orientation|keyboardHidden|keyboard|screenSize|smallestScreenSize|locale|layoutDirection|fontScale|screenLayout|density|uiMode"
