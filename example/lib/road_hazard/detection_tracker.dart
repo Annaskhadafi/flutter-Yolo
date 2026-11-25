@@ -33,14 +33,26 @@ class RoadHazardDetectionTracker {
   final int maxMissedFrames;
   final Map<String, TrackedHazard> _active = {};
   final Map<String, int> _missedFrames = {};
+  final Set<String> _capturedIds = {};
   int _nextId = 0;
 
   void clear() {
     _active.clear();
     _missedFrames.clear();
+    _capturedIds.clear();
+    _nextId = 0;
   }
 
   Set<String> get activeIds => _active.keys.toSet();
+  Set<String> get capturedIds => Set.unmodifiable(_capturedIds);
+
+  bool isCaptured(String id) => _capturedIds.contains(id);
+
+  void markCaptured(String id) => _capturedIds.add(id);
+
+  List<TrackedHazard> uncaptured(List<TrackedHazard> tracked) => tracked
+      .where((item) => !_capturedIds.contains(item.id))
+      .toList(growable: false);
 
   List<TrackedHazard> update(List<HazardDetection> detections) {
     final unmatched = _active.keys.toSet();

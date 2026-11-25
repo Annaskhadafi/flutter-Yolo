@@ -97,16 +97,21 @@ class _RoadHazardScreenState extends State<RoadHazardScreen> {
           )
           .toList(growable: false),
     );
-    final activeTrackIds = _detectionTracker.activeIds;
-    _eventIdByTrackId.removeWhere((id, _) => !activeTrackIds.contains(id));
+    final uncaptured = _detectionTracker.uncaptured(tracked);
     setState(() {
-      _latestHazard = hazards.isEmpty ? null : hazards.first;
-      _latestHazardId = tracked.isEmpty ? null : tracked.first.id;
+      _latestHazard = uncaptured.isEmpty
+          ? null
+          : hazards[tracked.indexOf(uncaptured.first)];
+      _latestHazardId = uncaptured.isEmpty ? null : uncaptured.first.id;
     });
     if (!_recording || hazards.isEmpty) return;
     for (var index = 0; index < tracked.length; index++) {
       final detection = tracked[index];
-      if (_eventIdByTrackId.containsKey(detection.id)) continue;
+      if (_detectionTracker.isCaptured(detection.id) ||
+          _eventIdByTrackId.containsKey(detection.id)) {
+        continue;
+      }
+      _detectionTracker.markCaptured(detection.id);
       _eventIdByTrackId[detection.id] = detection.id;
       _pendingCaptures.add((result: hazards[index], trackId: detection.id));
       unawaited(_processPendingCaptures());
@@ -284,12 +289,14 @@ class _RoadHazardScreenState extends State<RoadHazardScreen> {
         final photoFile = File(photoPath);
         if (photoFile.existsSync()) photoBytes = photoFile.readAsBytesSync();
       }
+      final offsetMs = event['videoOffsetMs'];
       return RoadHazardReportEvent(
         id: event['id'] as String? ?? '',
         label: event['label'] as String? ?? 'Other',
         confidence: (event['confidence'] as num?)?.toDouble() ?? 0,
         timestamp:
             DateTime.tryParse(event['time'] as String? ?? '') ?? DateTime.now(),
+        videoOffset: offsetMs is int ? Duration(milliseconds: offsetMs) : null,
         latitude: (event['latitude'] as num?)?.toDouble(),
         longitude: (event['longitude'] as num?)?.toDouble(),
         speedKmh: (event['speedKmh'] as num?)?.toDouble(),
@@ -956,6 +963,17 @@ class _RoadHazardScreenState extends State<RoadHazardScreen> {
               title: const Text('Road Hazard AI'),
               actions: [
                 IconButton(
+                  tooltip: 'Upload & Analisis Video',
+                  icon: const Icon(Icons.video_file_outlined),
+                  onPressed: () async {
+                    await Navigator.pushNamed(context, '/video');
+                    if (mounted) {
+                      _sessions.clear();
+                      await _loadSessions();
+                    }
+                  },
+                ),
+                IconButton(
                   tooltip: 'Riwayat inspeksi',
                   icon: const Icon(Icons.history),
                   onPressed: _showHistory,
@@ -1166,8 +1184,19 @@ class _RoadHazardScreenState extends State<RoadHazardScreen> {
           if (mounted) setState(() => _cameraError = null);
         },
       ),
-      if (current != null)
-        Positioned(left: 12, top: 12, child: _hazardBadge(current)),
+      if (current != null && _latestHazardId != null)
+        Positioned.fill(
+          child: IgnorePointer(
+            child: CustomPaint(
+              painter: _LiveDetectionPainter(
+                id: _latestHazardId!,
+                label: _label(current),
+                confidence: current.confidence,
+                box: current.normalizedBox,
+              ),
+            ),
+          ),
+        ),
       if (_cameraError != null)
         Positioned(
           left: 12,
@@ -1223,20 +1252,6 @@ class _RoadHazardScreenState extends State<RoadHazardScreen> {
       enabled ? SystemUiMode.immersiveSticky : SystemUiMode.edgeToEdge,
     );
   }
-
-  Widget _hazardBadge(YOLOResult result) => DecoratedBox(
-    decoration: BoxDecoration(
-      color: Colors.red.shade900.withValues(alpha: 0.9),
-      borderRadius: BorderRadius.circular(12),
-    ),
-    child: Padding(
-      padding: const EdgeInsets.all(10),
-      child: Text(
-        '${_label(result)} · ${(result.confidence * 100).toStringAsFixed(0)}%',
-        style: const TextStyle(fontWeight: FontWeight.bold),
-      ),
-    ),
-  );
 
   Widget _stat(String label, int count, Color color) => Card(
     child: Padding(
@@ -1472,4 +1487,67 @@ class _RoadHazardScreenState extends State<RoadHazardScreen> {
       }
     }
   }
+}
+
+class _LiveDetectionPainter extends CustomPainter {
+  const _LiveDetectionPainter({
+    required this.id,
+    required this.label,
+    required this.confidence,
+    required this.box,
+  });
+
+  final String id;
+  final String label;
+  final double confidence;
+  final Rect box;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    if (size.isEmpty || box.isEmpty) return;
+    final rect = Rect.fromLTRB(
+      (box.left * size.width).clamp(0.0, size.width),
+      (box.top * size.height).clamp(0.0, size.height),
+      (box.right * size.width).clamp(0.0, size.width),
+      (box.bottom * size.height).clamp(0.0, size.height),
+    );
+    final boxPaint = Paint()
+      ..color = Colors.redAccent
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 3;
+    canvas.drawRect(rect, boxPaint);
+
+    final painter = TextPainter(
+      text: TextSpan(
+        text: '$id · $label · ${(confidence * 100).toStringAsFixed(0)}%',
+        style: const TextStyle(
+          color: Colors.white,
+          fontSize: 13,
+          fontWeight: FontWeight.bold,
+        ),
+      ),
+      textDirection: TextDirection.ltr,
+      maxLines: 1,
+      ellipsis: '…',
+    )..layout(maxWidth: size.width * 0.8);
+    final labelWidth = (painter.width + 12).clamp(0.0, size.width);
+    final labelHeight = painter.height + 8;
+    final labelLeft = rect.left.clamp(0.0, size.width - labelWidth);
+    final labelTop = rect.top >= labelHeight
+        ? rect.top - labelHeight
+        : (rect.bottom).clamp(0.0, size.height - labelHeight);
+    final background = RRect.fromRectAndRadius(
+      Rect.fromLTWH(labelLeft, labelTop, labelWidth, labelHeight),
+      const Radius.circular(4),
+    );
+    canvas.drawRRect(background, Paint()..color = Colors.redAccent);
+    painter.paint(canvas, Offset(labelLeft + 6, labelTop + 4));
+  }
+
+  @override
+  bool shouldRepaint(covariant _LiveDetectionPainter oldDelegate) =>
+      oldDelegate.id != id ||
+      oldDelegate.label != label ||
+      oldDelegate.confidence != confidence ||
+      oldDelegate.box != box;
 }

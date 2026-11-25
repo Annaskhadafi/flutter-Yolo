@@ -5,6 +5,7 @@ import 'package:material_ui/material_ui.dart';
 import 'package:roadchitra_example/presentation/screens/camera_inference_screen.dart';
 import 'package:roadchitra_example/presentation/screens/road_hazard_screen.dart';
 import 'package:roadchitra_example/presentation/screens/single_image_screen.dart';
+import 'package:roadchitra_example/presentation/screens/video_analysis_screen.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
@@ -26,6 +27,7 @@ class YOLOExampleApp extends StatelessWidget {
         '/': (_) => const RoadHazardScreen(),
         '/camera': (_) => const CameraInferenceScreen(),
         '/single': (_) => const SingleImageScreen(),
+        '/video': (_) => const VideoAnalysisScreen(),
       },
     );
   }
