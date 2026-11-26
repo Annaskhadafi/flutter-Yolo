@@ -6,7 +6,10 @@ import 'dart:io';
 
 import 'package:material_ui/material_ui.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter_map/flutter_map.dart';
+import 'package:latlong2/latlong.dart';
 import 'package:roadchitra_example/road_hazard/detection_tracker.dart';
+import 'package:roadchitra_example/road_hazard/feature_tools.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:share_plus/share_plus.dart';
@@ -35,6 +38,9 @@ class _RoadHazardScreenState extends State<RoadHazardScreen> {
   final _controller = YOLOViewController();
   final _sectionController = TextEditingController(text: 'Hauling Road');
   final _summaryController = TextEditingController();
+  final _historySearchController = TextEditingController();
+  String _historySeverity = 'ALL';
+  String _historySource = 'ALL';
   final List<Map<String, dynamic>> _events = [];
   final List<Map<String, dynamic>> _sessions = [];
   final _reportExporter = RoadHazardReportExporter();
@@ -70,6 +76,8 @@ class _RoadHazardScreenState extends State<RoadHazardScreen> {
   void dispose() {
     SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
     _sectionController.dispose();
+    _summaryController.dispose();
+    _historySearchController.dispose();
     _controller.dispose();
     super.dispose();
   }
@@ -399,6 +407,7 @@ class _RoadHazardScreenState extends State<RoadHazardScreen> {
     final counts = _eventCounts(events);
     final row = <String, dynamic>{
       'code': 'RH-${now.toUtc().millisecondsSinceEpoch}',
+      'source': 'camera',
       'site': 'Local device',
       'roadSection': _sectionController.text.trim().isEmpty
           ? 'Hauling Road'
@@ -702,6 +711,27 @@ class _RoadHazardScreenState extends State<RoadHazardScreen> {
     }
   }
 
+  Future<void> _exportHistoryCsv() async {
+    try {
+      final csv = roadHazardHistoryCsv(_sessions);
+      final directory = await getTemporaryDirectory();
+      final file = File('${directory.path}/chitra-vision-history.csv');
+      await file.writeAsString(csv, flush: true);
+      await SharePlus.instance.share(
+        ShareParams(
+          files: [XFile(file.path)],
+          subject: 'Chitra Vision hazard history CSV',
+        ),
+      );
+    } catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('Gagal mengekspor CSV: $error')));
+      }
+    }
+  }
+
   Future<void> _clearHistory() async {
     final confirmed = await showDialog<bool>(
       context: context,
@@ -884,49 +914,73 @@ class _RoadHazardScreenState extends State<RoadHazardScreen> {
       );
       return;
     }
-    final rows = points.map((event) {
-      final latitude = (event['latitude'] as num).toDouble();
-      final longitude = (event['longitude'] as num).toDouble();
-      return ListTile(
-        leading: const Icon(Icons.location_on_outlined),
-        title: Text(event['label'] as String? ?? 'Unknown hazard'),
-        subtitle: Text('$latitude, $longitude'),
-        trailing: IconButton(
-          tooltip: 'Buka di peta',
-          icon: const Icon(Icons.open_in_new),
-          onPressed: () => unawaited(
-            SharePlus.instance.share(
-              ShareParams(
-                uri: Uri.https('maps.google.com', '/', {
-                  'q': '$latitude,$longitude',
-                }),
-              ),
-            ),
+    final coordinates = points
+        .map(
+          (event) => LatLng(
+            (event['latitude'] as num).toDouble(),
+            (event['longitude'] as num).toDouble(),
           ),
-        ),
-      );
-    }).toList();
+        )
+        .toList();
     await showModalBottomSheet<void>(
       context: context,
       isScrollControlled: true,
       builder: (context) => SafeArea(
         child: SizedBox(
-          height: MediaQuery.sizeOf(context).height * 0.7,
-          child: Column(
-            children: [
-              Padding(
-                padding: const EdgeInsets.all(16),
-                child: Text(
-                  'Titik hazard pada peta',
-                  style: Theme.of(context).textTheme.titleLarge,
-                ),
+          height: MediaQuery.sizeOf(context).height * 0.8,
+          child: FlutterMap(
+            options: MapOptions(
+              initialCameraFit: CameraFit.coordinates(
+                coordinates: coordinates,
+                padding: const EdgeInsets.all(48),
+                maxZoom: 18,
+                minZoom: 5,
               ),
-              Expanded(child: ListView(children: rows)),
+            ),
+            children: [
+              TileLayer(
+                urlTemplate: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
+                userAgentPackageName: 'com.chitraparatama.chitravision',
+              ),
+              MarkerLayer(
+                markers: points.map((event) {
+                  final point = LatLng(
+                    (event['latitude'] as num).toDouble(),
+                    (event['longitude'] as num).toDouble(),
+                  );
+                  return Marker(
+                    point: point,
+                    width: 56,
+                    height: 64,
+                    child: GestureDetector(
+                      onTap: () => unawaited(
+                        launchUrl(
+                          Uri.https('maps.google.com', '/', {
+                            'q': '${point.latitude},${point.longitude}',
+                          }),
+                          mode: LaunchMode.externalApplication,
+                        ),
+                      ),
+                      child: const Icon(
+                        Icons.location_pin,
+                        color: Colors.red,
+                        size: 44,
+                      ),
+                    ),
+                  );
+                }).toList(),
+              ),
+              const RichAttributionWidget(
+                attributions: [
+                  TextSourceAttribution('© OpenStreetMap contributors'),
+                ],
+              ),
             ],
           ),
         ),
       ),
     );
+    if (!mounted) return;
   }
 
   Widget _severityBadge(String severity) {
@@ -962,6 +1016,17 @@ class _RoadHazardScreenState extends State<RoadHazardScreen> {
           : AppBar(
               title: const Text('Road Hazard AI'),
               actions: [
+                IconButton(
+                  tooltip: 'Analisis Foto',
+                  icon: const Icon(Icons.photo_library_outlined),
+                  onPressed: () async {
+                    await Navigator.pushNamed(context, '/single');
+                    if (mounted) {
+                      _sessions.clear();
+                      await _loadSessions();
+                    }
+                  },
+                ),
                 IconButton(
                   tooltip: 'Upload & Analisis Video',
                   icon: const Icon(Icons.video_file_outlined),
@@ -1315,10 +1380,72 @@ class _RoadHazardScreenState extends State<RoadHazardScreen> {
                   OutlinedButton.icon(
                     onPressed: _sessions.isEmpty
                         ? null
+                        : () => unawaited(_exportHistoryCsv()),
+                    icon: const Icon(Icons.download_outlined),
+                    label: const Text('CSV'),
+                  ),
+                  OutlinedButton.icon(
+                    onPressed: _sessions.isEmpty
+                        ? null
                         : () => unawaited(_clearHistory()),
                     icon: const Icon(Icons.delete_sweep_outlined),
                     label: const Text('Hapus semua'),
                   ),
+                ],
+              ),
+            ),
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 16),
+              child: TextField(
+                controller: _historySearchController,
+                decoration: InputDecoration(
+                  prefixIcon: const Icon(Icons.search),
+                  hintText: 'Cari kode sesi atau nama jalan',
+                  suffixIcon: IconButton(
+                    tooltip: 'Hapus pencarian',
+                    onPressed: () {
+                      _historySearchController.clear();
+                      setState(() {});
+                    },
+                    icon: const Icon(Icons.clear),
+                  ),
+                  border: const OutlineInputBorder(),
+                ),
+                onChanged: (_) => setState(() {}),
+              ),
+            ),
+            Wrap(
+              alignment: WrapAlignment.center,
+              spacing: 4,
+              children: [
+                for (final severity in [
+                  'ALL',
+                  'LOW',
+                  'MEDIUM',
+                  'HIGH',
+                  'CRITICAL',
+                ])
+                  ChoiceChip(
+                    label: Text(severity == 'ALL' ? 'Semua risiko' : severity),
+                    selected: _historySeverity == severity,
+                    onSelected: (_) =>
+                        setState(() => _historySeverity = severity),
+                  ),
+                for (final source in ['ALL', 'camera', 'video', 'image'])
+                  ChoiceChip(
+                    label: Text(source == 'ALL' ? 'Semua sumber' : source),
+                    selected: _historySource == source,
+                    onSelected: (_) => setState(() => _historySource = source),
+                  ),
+              ],
+            ),
+            Padding(
+              padding: const EdgeInsets.all(8),
+              child: Wrap(
+                alignment: WrapAlignment.center,
+                children: [
+                  for (final entry in historyHazardTotals(_sessions).entries)
+                    Chip(label: Text('${entry.key}: ${entry.value}')),
                 ],
               ),
             ),
@@ -1328,15 +1455,25 @@ class _RoadHazardScreenState extends State<RoadHazardScreen> {
                   if (_loadingHistory) {
                     return const Center(child: CircularProgressIndicator());
                   }
-                  if (_sessions.isEmpty) {
-                    return const Center(
-                      child: Text('Belum ada inspeksi tersimpan.'),
+                  final filteredSessions = filterRoadHazardHistory(
+                    _sessions,
+                    query: _historySearchController.text,
+                    severity: _historySeverity,
+                    source: _historySource,
+                  );
+                  if (filteredSessions.isEmpty) {
+                    return Center(
+                      child: Text(
+                        _sessions.isEmpty
+                            ? 'Belum ada inspeksi tersimpan.'
+                            : 'Tidak ada sesi yang cocok dengan filter.',
+                      ),
                     );
                   }
                   return ListView.builder(
-                    itemCount: _sessions.length,
+                    itemCount: filteredSessions.length,
                     itemBuilder: (_, index) {
-                      final session = _sessions[index];
+                      final session = filteredSessions[index];
                       final severity = session['severity'] as String? ?? 'LOW';
                       final eventCount = session['totalHazards'] as int? ?? 0;
                       final distance =

@@ -6,11 +6,13 @@ import 'dart:io';
 import 'dart:ui' as ui;
 
 import 'package:flutter/services.dart';
+import 'package:image_gallery_saver_plus/image_gallery_saver_plus.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:material_ui/material_ui.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:roadchitra_example/reports/road_hazard_report.dart';
 import 'package:roadchitra_example/road_hazard/detection_tracker.dart';
+import 'package:roadchitra_example/road_hazard/feature_tools.dart';
 import 'package:share_plus/share_plus.dart';
 import 'package:ultralytics_yolo/ultralytics_yolo.dart';
 import 'package:url_launcher/url_launcher.dart';
@@ -51,6 +53,7 @@ class _VideoAnalysisScreenState extends State<VideoAnalysisScreen> {
   String? _videoPath;
   String? _videoName;
   int _videoDurationMs = 0;
+  String? _videoMimeType;
 
   DateTime _startTime = DateTime.now();
   int _fps = 2;
@@ -101,26 +104,38 @@ class _VideoAnalysisScreenState extends State<VideoAnalysisScreen> {
     final picked = await _picker.pickVideo(source: ImageSource.gallery);
     if (picked == null) return;
     try {
-      final durationMs =
-          await _videoChannel.invokeMethod<int>('getVideoDurationMs', {
-            'path': picked.path,
-          }) ??
-          0;
+      final metadata = await _videoChannel.invokeMethod<dynamic>(
+        'getVideoDurationMs',
+        {'path': picked.path},
+      );
+      final durationMs = metadata is Map
+          ? (metadata['durationMs'] as num?)?.toInt() ?? 0
+          : metadata is num
+          ? metadata.toInt()
+          : 0;
+      final mime = metadata is Map ? metadata['mimeType'] as String? : null;
       final firstFrame = await _videoChannel.invokeMethod<Uint8List>(
         'extractFrame',
         {'path': picked.path, 'timeMs': 0, 'maxWidth': 1280},
       );
-      Size? frameSize;
-      if (firstFrame != null) {
-        final decoded = await _decodeImage(firstFrame);
-        frameSize = Size(decoded.width.toDouble(), decoded.height.toDouble());
-        decoded.dispose();
+      if (firstFrame == null) {
+        final codecHint =
+            (mime?.contains('hevc') ?? false) ||
+                (mime?.contains('265') ?? false)
+            ? ' Codec H.265/HEVC terdeteksi. Pastikan perangkat mendukung profil video ini atau konversi ke H.264.'
+            : ' Pastikan file memiliki video track yang didukung perangkat.';
+        throw StateError('Frame pertama tidak dapat dibaca.$codecHint');
       }
+      Size? frameSize;
+      final decoded = await _decodeImage(firstFrame);
+      frameSize = Size(decoded.width.toDouble(), decoded.height.toDouble());
+      decoded.dispose();
       if (!mounted) return;
       setState(() {
         _videoPath = picked.path;
         _videoName = picked.name;
         _videoDurationMs = durationMs;
+        _videoMimeType = mime;
         _currentTimeMs = 0;
         _currentFrameBytes = firstFrame;
         _currentFrameSize = frameSize;
@@ -189,6 +204,8 @@ class _VideoAnalysisScreenState extends State<VideoAnalysisScreen> {
 
     final stepMs = (1000 / _fps).round().clamp(100, 1000);
     final directory = await getApplicationDocumentsDirectory();
+    var decodedFrames = 0;
+    var skippedFrames = 0;
 
     try {
       for (var timeMs = 0; timeMs <= durationMs; timeMs += stepMs) {
@@ -202,7 +219,21 @@ class _VideoAnalysisScreenState extends State<VideoAnalysisScreen> {
           'extractFrame',
           {'path': _videoPath, 'timeMs': timeMs, 'maxWidth': 1280},
         );
-        if (frameBytes == null) continue;
+        if (frameBytes == null) {
+          skippedFrames++;
+          if (decodedFrames == 0 && skippedFrames >= 3) {
+            final isHevc =
+                (_videoMimeType?.toLowerCase().contains('hevc') ?? false) ||
+                (_videoMimeType?.contains('265') ?? false);
+            throw StateError(
+              isHevc
+                  ? 'Decoder perangkat tidak dapat membaca stream H.265/HEVC ini. Coba file HEVC standar (hvc1/hev1) atau konversi video ke H.264.'
+                  : 'Perangkat tidak dapat mendekode frame video. Coba konversi video ke H.264 MP4.',
+            );
+          }
+          continue;
+        }
+        decodedFrames++;
 
         final rawResult = await _yolo.predict(
           frameBytes,
@@ -294,19 +325,24 @@ class _VideoAnalysisScreenState extends State<VideoAnalysisScreen> {
         });
       }
 
-      if (mounted && !_cancelRequested) {
+      if (mounted) {
+        final processedSeconds = _cancelRequested
+            ? (_currentTimeMs / 1000).round()
+            : (durationMs / 1000).round();
         final session = await _persistCompletedSession(
-          durationMs > 0 ? (durationMs / 1000).round() : 0,
+          processedSeconds,
+          stoppedEarly: _cancelRequested,
         );
         if (mounted) {
           setState(() => _completedSession = session);
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
-              content: Text(
-                'Analisis selesai: ${_events.length} hazard unik terdeteksi.',
-              ),
-            ),
-          );
+          final summary = _cancelRequested
+              ? 'Dihentikan. ${_events.length} hazard tersimpan; PDF siap diekspor.'
+              : 'Analisis selesai: ${_events.length} hazard unik terdeteksi.';
+          final skippedNote = skippedFrames > 0
+              ? ' $skippedFrames frame gagal didekode (${_videoMimeType ?? 'codec tidak dikenal'}).'
+              : '';
+          ScaffoldMessenger.of(context)
+              .showSnackBar(SnackBar(content: Text('$summary$skippedNote')));
         }
       }
     } catch (error) {
@@ -398,9 +434,238 @@ class _VideoAnalysisScreenState extends State<VideoAnalysisScreen> {
     return byteData.buffer.asUint8List();
   }
 
-  Future<Map<String, dynamic>> _persistCompletedSession(
-    int durationSeconds,
+  Future<List<Map<String, dynamic>>> _loadVideoHistory() async {
+    final file = File(
+      '${(await getApplicationDocumentsDirectory()).path}/$_sessionFile',
+    );
+    if (!await file.exists()) return [];
+    final decoded = jsonDecode(await file.readAsString());
+    if (decoded is! List) return [];
+    return decoded
+        .whereType<Map>()
+        .map((row) => Map<String, dynamic>.from(row))
+        .where((row) => row['source'] == 'video')
+        .toList(growable: false);
+  }
+
+  Future<void> _openVideoHistory() async {
+    try {
+      final sessions = await _loadVideoHistory();
+      if (!mounted) return;
+      await showModalBottomSheet<void>(
+        context: context,
+        isScrollControlled: true,
+        builder: (sheetContext) => SafeArea(
+          child: SizedBox(
+            height: MediaQuery.sizeOf(sheetContext).height * 0.8,
+            child: Column(
+              children: [
+                Padding(
+                  padding: const EdgeInsets.all(16),
+                  child: Text(
+                    'Riwayat analisis video (${sessions.length})',
+                    style: Theme.of(sheetContext).textTheme.titleLarge,
+                  ),
+                ),
+                Expanded(
+                  child: sessions.isEmpty
+                      ? const Center(
+                          child: Text('Belum ada hasil video tersimpan.'),
+                        )
+                      : ListView.builder(
+                          itemCount: sessions.length,
+                          itemBuilder: (context, index) {
+                            final session = sessions[index];
+                            final events =
+                                (session['events'] as List? ?? const [])
+                                    .whereType<Map>()
+                                    .map(
+                                      (event) =>
+                                          Map<String, dynamic>.from(event),
+                                    )
+                                    .toList();
+                            final stopped = session['stoppedEarly'] == true;
+                            return ListTile(
+                              leading: Icon(
+                                stopped
+                                    ? Icons.stop_circle_outlined
+                                    : Icons.video_file,
+                              ),
+                              title: Text(
+                                session['videoName'] as String? ??
+                                    session['code'] as String? ??
+                                    'Video',
+                              ),
+                              subtitle: Text(
+                                '${session['code']} · ${events.length} hazard · ${_formatDurationMs(((session['durationSeconds'] as num?)?.toInt() ?? 0) * 1000)}${stopped ? ' · Dihentikan' : ''}',
+                              ),
+                              trailing: IconButton(
+                                tooltip: 'Ekspor PDF',
+                                icon: const Icon(Icons.picture_as_pdf),
+                                onPressed: () =>
+                                    unawaited(_exportSessionPdf(session)),
+                              ),
+                              onTap: () {
+                                Navigator.pop(sheetContext);
+                                unawaited(_showHistorySession(session));
+                              },
+                            );
+                          },
+                        ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      );
+    } catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Gagal membuka riwayat video: $error')),
+        );
+      }
+    }
+  }
+
+  Future<void> _editHistoryNote(
+    Map<String, dynamic> session,
+    Map<String, dynamic> event,
   ) async {
+    final controller = TextEditingController(
+      text: event['notes'] as String? ?? '',
+    );
+    final note = await showDialog<String>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text(
+          'Catatan: ${event['id'] ?? ''} · ${event['label'] ?? 'Hazard'}',
+        ),
+        content: TextField(controller: controller, maxLines: 4, maxLength: 300),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Batal'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, controller.text.trim()),
+            child: const Text('Simpan'),
+          ),
+        ],
+      ),
+    );
+    controller.dispose();
+    if (note == null) return;
+    if (note.isEmpty) {
+      event.remove('notes');
+    } else {
+      event['notes'] = note;
+    }
+    try {
+      final file = File(
+        '${(await getApplicationDocumentsDirectory()).path}/$_sessionFile',
+      );
+      await saveHistorySession(file, session);
+      if (mounted) setState(() {});
+    } catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Gagal menyimpan catatan: $error')),
+        );
+      }
+    }
+  }
+
+  Future<void> _exportSessionPdf(Map<String, dynamic> session) async {
+    try {
+      final bytes = await _reportExporter.toPdf(_buildReport(session));
+      final directory = await getTemporaryDirectory();
+      final file = File('${directory.path}/${session['code']}.pdf');
+      await file.writeAsBytes(bytes, flush: true);
+      await SharePlus.instance.share(
+        ShareParams(
+          files: [XFile(file.path)],
+          subject: '${session['code']}.pdf',
+        ),
+      );
+    } catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Gagal ekspor PDF riwayat: $error')),
+        );
+      }
+    }
+  }
+
+  Future<void> _showHistorySession(Map<String, dynamic> session) async {
+    final events = (session['events'] as List? ?? const [])
+        .whereType<Map>()
+        .map((event) => Map<String, dynamic>.from(event))
+        .toList();
+    await showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      builder: (sheetContext) => SafeArea(
+        child: SizedBox(
+          height: MediaQuery.sizeOf(sheetContext).height * 0.85,
+          child: Column(
+            children: [
+              ListTile(
+                title: Text(session['code'] as String? ?? 'Video history'),
+                subtitle: Text(
+                  '${session['videoName'] ?? ''} · ${events.length} hazard',
+                ),
+                trailing: IconButton(
+                  tooltip: 'Ekspor PDF',
+                  onPressed: () => unawaited(_exportSessionPdf(session)),
+                  icon: const Icon(Icons.picture_as_pdf),
+                ),
+              ),
+              Expanded(
+                child: events.isEmpty
+                    ? const Center(child: Text('Tidak ada event tersimpan.'))
+                    : ListView(
+                        children: events.map((event) {
+                          final path = event['photoPath'] as String?;
+                          final image = path == null ? null : File(path);
+                          return ListTile(
+                            leading: image != null && image.existsSync()
+                                ? Image.file(
+                                    image,
+                                    width: 56,
+                                    height: 56,
+                                    fit: BoxFit.cover,
+                                  )
+                                : const Icon(Icons.warning_amber_rounded),
+                            title: Text(
+                              '${event['id'] ?? ''} · ${event['label'] ?? 'Hazard'}',
+                            ),
+                            subtitle: Text(
+                              'Offset ${_formatDurationMs((event['videoOffsetMs'] as num?)?.toInt() ?? 0)}',
+                            ),
+                            onTap: image != null && image.existsSync()
+                                ? () => unawaited(_showEvidence(event))
+                                : null,
+                            trailing: IconButton(
+                              tooltip: 'Edit catatan',
+                              icon: const Icon(Icons.edit_note),
+                              onPressed: () =>
+                                  unawaited(_editHistoryNote(session, event)),
+                            ),
+                          );
+                        }).toList(),
+                      ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Future<Map<String, dynamic>> _persistCompletedSession(
+    int durationSeconds, {
+    required bool stoppedEarly,
+  }) async {
     final endTime = _startTime.add(Duration(seconds: durationSeconds));
     final counts = _countEvents(_events);
     final code =
@@ -417,12 +682,18 @@ class _VideoAnalysisScreenState extends State<VideoAnalysisScreen> {
       'startTime': _startTime.toIso8601String(),
       'endTime': endTime.toIso8601String(),
       'durationSeconds': durationSeconds,
+      'stoppedEarly': stoppedEarly,
       'distanceMeters': 0.0,
       'potholesCount': counts['Potholes']!,
       'corrugationCount': counts['Corragation']!,
       'rutsCount': counts['Ruts']!,
       'severity': _severityFor(_events.length),
-      'summaryNotes': _summaryController.text.trim(),
+      'summaryNotes': [
+        if (stoppedEarly)
+          'Analysis stopped early; report contains processed frames only.',
+        if (_summaryController.text.trim().isNotEmpty)
+          _summaryController.text.trim(),
+      ].join('\\n'),
       'events': List<Map<String, dynamic>>.from(_events.reversed),
     };
 
@@ -515,6 +786,101 @@ class _VideoAnalysisScreenState extends State<VideoAnalysisScreen> {
     );
   }
 
+  Future<void> _showEvidence(Map<String, dynamic> event) async {
+    final path = event['photoPath'];
+    if (path is! String) return;
+    final imageFile = File(path);
+    if (!await imageFile.exists() || !mounted) return;
+    await showDialog<void>(
+      context: context,
+      builder: (dialogContext) => Dialog(
+        insetPadding: const EdgeInsets.all(16),
+        child: SizedBox(
+          width: 640,
+          height: MediaQuery.sizeOf(context).height * 0.8,
+          child: Padding(
+            padding: const EdgeInsets.all(12),
+            child: Column(
+              children: [
+                Row(
+                  children: [
+                    Expanded(
+                      child: Text(
+                        '${event['id'] ?? ''} · ${event['label'] ?? 'Hazard'}',
+                        style: Theme.of(context).textTheme.titleMedium,
+                      ),
+                    ),
+                    IconButton(
+                      tooltip: 'Tutup',
+                      onPressed: () => Navigator.pop(dialogContext),
+                      icon: const Icon(Icons.close),
+                    ),
+                  ],
+                ),
+                Expanded(
+                  child: InteractiveViewer(
+                    minScale: 0.7,
+                    maxScale: 5,
+                    child: Center(
+                      child: Image.file(
+                        imageFile,
+                        fit: BoxFit.contain,
+                        errorBuilder: (_, _, _) =>
+                            const Icon(Icons.broken_image),
+                      ),
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 8),
+                SizedBox(
+                  width: double.infinity,
+                  child: FilledButton.icon(
+                    onPressed: () =>
+                        unawaited(_saveEvidenceToGallery(imageFile, event)),
+                    icon: const Icon(Icons.save_alt),
+                    label: const Text('Simpan ke Galeri'),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Future<void> _saveEvidenceToGallery(
+    File imageFile,
+    Map<String, dynamic> event,
+  ) async {
+    try {
+      final result = await ImageGallerySaverPlus.saveImage(
+        await imageFile.readAsBytes(),
+        name: 'ChitraVision-${event['id'] ?? 'evidence'}',
+        quality: 100,
+        creationDate: DateTime.tryParse(event['time'] as String? ?? ''),
+      );
+      final saved = result is Map && result['isSuccess'] == true;
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              saved
+                  ? 'Foto evidence tersimpan di galeri.'
+                  : 'Gagal menyimpan foto ke galeri.',
+            ),
+          ),
+        );
+      }
+    } catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('Gagal menyimpan foto: $error')));
+      }
+    }
+  }
+
   Future<void> _exportPdf() async {
     final session = _completedSession;
     if (session == null) return;
@@ -582,7 +948,16 @@ class _VideoAnalysisScreenState extends State<VideoAnalysisScreen> {
     final counts = _countEvents(_events);
 
     return Scaffold(
-      appBar: AppBar(title: const Text('Analisis Video Hazard')),
+      appBar: AppBar(
+        title: const Text('Analisis Video Hazard'),
+        actions: [
+          IconButton(
+            tooltip: 'Riwayat analisis video',
+            onPressed: _openVideoHistory,
+            icon: const Icon(Icons.history),
+          ),
+        ],
+      ),
       body: SafeArea(
         child: ListView(
           padding: const EdgeInsets.all(16),
@@ -606,7 +981,7 @@ class _VideoAnalysisScreenState extends State<VideoAnalysisScreen> {
                           child: Text(
                             _videoName == null
                                 ? 'Pilih video inspeksi jalan untuk dianalisis'
-                                : _videoName!,
+                                : '${_videoName!}${_videoMimeType == null ? '' : ' · $_videoMimeType'}',
                             textAlign: TextAlign.center,
                           ),
                         )
@@ -814,6 +1189,9 @@ class _VideoAnalysisScreenState extends State<VideoAnalysisScreen> {
                     _startTime;
                 return Card(
                   child: ListTile(
+                    onTap: file != null && file.existsSync()
+                        ? () => unawaited(_showEvidence(event))
+                        : null,
                     leading: file != null && file.existsSync()
                         ? ClipRRect(
                             borderRadius: BorderRadius.circular(8),
@@ -828,7 +1206,7 @@ class _VideoAnalysisScreenState extends State<VideoAnalysisScreen> {
                     title: Text('${event['id']} · ${event['label']}'),
                     subtitle: Text(
                       '${(((event['confidence'] as num?) ?? 0) * 100).toStringAsFixed(0)}% · '
-                      '${_formatDateTime(time)} · Offset ${_formatDurationMs(offsetMs)}',
+                      '${_formatDateTime(time)} · Offset ${_formatDurationMs(offsetMs)} · Ketuk foto untuk perbesar/simpan',
                     ),
                   ),
                 );

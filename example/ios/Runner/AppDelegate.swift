@@ -34,8 +34,23 @@ import UIKit
         DispatchQueue.global(qos: .userInitiated).async {
           let asset = AVURLAsset(url: URL(fileURLWithPath: path))
           let durationMs = Int64(CMTimeGetSeconds(asset.duration) * 1000.0)
+          let codec = asset.tracks(withMediaType: .video)
+            .first?.formatDescriptions
+            .compactMap { $0 as? CMFormatDescription }
+            .first
+            .map { CMFormatDescriptionGetMediaSubType($0) }
+            .map { subtype -> String in
+              let bytes: [UInt8] = [
+                UInt8((subtype >> 24) & 0xff),
+                UInt8((subtype >> 16) & 0xff),
+                UInt8((subtype >> 8) & 0xff),
+                UInt8(subtype & 0xff),
+              ]
+              return String(bytes: bytes, encoding: .ascii) ?? "unknown"
+            }
+          let mime = codec.map { ["hvc1", "hev1"].contains($0) ? "video/hevc" : "video/\($0)" } ?? "unknown"
           DispatchQueue.main.async {
-            result(max(0, durationMs))
+            result(["durationMs": max(0, durationMs), "mimeType": mime])
           }
         }
 

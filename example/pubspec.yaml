@@ -14,11 +14,14 @@ dependencies:
   cupertino_icons: ^1.0.9
   flutter:
     sdk: flutter
+  flutter_map: ^8.3.2
+  latlong2: ^0.9.1
   image_picker: ^1.2.1
   material_ui: ^1.11.1
   package_info_plus: ^9.0.0
   path_provider: ^2.1.5
   geolocator: ^14.0.2
+  image_gallery_saver_plus: ^5.1.1
   # Pinned to ^12.x: share_plus 13.x ships a Swift Package umbrella that fails framework module verification under
   # Xcode 26.5 ("'Flutter/Flutter.h' file not found", "double-quoted include in framework header"). Revisit once the
   # upstream package re-publishes with a compatible module map.

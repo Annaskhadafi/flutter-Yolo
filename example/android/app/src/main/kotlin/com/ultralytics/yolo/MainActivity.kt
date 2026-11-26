@@ -4,6 +4,8 @@ package com.ultralytics.yolo
 
 import android.graphics.Bitmap
 import android.graphics.Color
+import android.media.MediaExtractor
+import android.media.MediaFormat
 import android.media.MediaMetadataRetriever
 import android.os.Bundle
 import androidx.activity.SystemBarStyle
@@ -47,7 +49,10 @@ class MainActivity : FlutterFragmentActivity() {
                                     retriever
                                         .extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)
                                         ?.toLongOrNull() ?: 0L
-                                runOnUiThread { result.success(durationMs) }
+                                val mime = readVideoCodecMime(path)
+                                runOnUiThread {
+                                    result.success(mapOf("durationMs" to durationMs, "mimeType" to mime))
+                                }
                             } catch (e: Exception) {
                                 runOnUiThread {
                                     result.error("VIDEO_DURATION_ERROR", e.message, null)
@@ -113,6 +118,22 @@ class MainActivity : FlutterFragmentActivity() {
                     else -> result.notImplemented()
                 }
             }
+    }
+
+    private fun readVideoCodecMime(path: String): String? {
+        val extractor = MediaExtractor()
+        return try {
+            extractor.setDataSource(path)
+            (0 until extractor.trackCount)
+                .asSequence()
+                .map { extractor.getTrackFormat(it) }
+                .mapNotNull { format -> format.getString(MediaFormat.KEY_MIME) }
+                .firstOrNull { it.startsWith("video/") }
+        } catch (_: Exception) {
+            null
+        } finally {
+            runCatching { extractor.release() }
+        }
     }
 
     override fun onDestroy() {
